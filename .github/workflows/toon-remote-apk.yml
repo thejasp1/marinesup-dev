@@ -19,6 +19,28 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
+      - name: Apply nullable-data compile fix
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('toon-remote/app/src/main/java/nl/wfawilbrink/toonremote/MainActivity.kt')
+          s = p.read_text()
+          marker = '''        if (!connected) {
+            DisconnectedCard(ip, state, onRefresh, onSetup)
+            return@Column
+        }
+'''
+          replacement = marker + '''
+        val liveData = data ?: return@Column
+'''
+          if 'val liveData = data ?: return@Column' not in s:
+              s = s.replace(marker, replacement, 1)
+          s = s.replace('data!!.heating', 'liveData.heating')
+          s = s.replace('data.heating', 'liveData.heating')
+          s = s.replace('data.roomTemp', 'liveData.roomTemp')
+          s = s.replace('data.setpoint', 'liveData.setpoint')
+          p.write_text(s)
+          PY
       - name: Build APK
         working-directory: toon-remote
         run: gradle assembleDebug --stacktrace
