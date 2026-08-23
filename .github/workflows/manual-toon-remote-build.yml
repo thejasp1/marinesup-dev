@@ -24,33 +24,50 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
-      - name: Apply JSW branding and nullable-data fix
+      - name: Apply JSW iPhone-parity design and compile fixes
         run: |
           python3 - <<'PY'
           from pathlib import Path
           p = Path('toon-remote/app/src/main/java/nl/wfawilbrink/toonremote/MainActivity.kt')
           s = p.read_text()
+
           marker = '''        if (!connected) {\n            DisconnectedCard(ip, state, onRefresh, onSetup)\n            return@Column\n        }\n'''
           replacement = marker + '''\n        val liveData = data ?: return@Column\n'''
           if 'val liveData = data ?: return@Column' not in s:
               s = s.replace(marker, replacement, 1)
+
           s = s.replace('data!!.heating', 'liveData.heating')
           s = s.replace('data.heating', 'liveData.heating')
           s = s.replace('data.roomTemp', 'liveData.roomTemp')
           s = s.replace('data.setpoint', 'liveData.setpoint')
-          s = s.replace('W.F.A. Wilbrink Software', 'Jasp Software · JSW')
+
+          # JSW branding exactly aligned with iPhone family.
           s = s.replace('W.F.A. Wilbrink Software · Enterprise', 'Jasp Software · JSW Enterprise')
-          s = s.replace('Enterprise Edition', 'JSW Enterprise Edition')
+          s = s.replace('W.F.A. Wilbrink Software', 'Jasp Software')
+          s = s.replace('Enterprise Edition', 'ENTERPRISE')
+
+          # Match iPhone tab order and labels: Dashboard, Programma, Energie, Instellingen.
+          s = s.replace('Triple(Icons.Outlined.Home, "Home", 0),\n                    Triple(Icons.Outlined.Bolt, "Energie", 1),\n                    Triple(Icons.Outlined.Schedule, "Programma", 2),',
+                        'Triple(Icons.Outlined.Home, "Dashboard", 0),\n                    Triple(Icons.Outlined.Schedule, "Programma", 1),\n                    Triple(Icons.Outlined.Bolt, "Energie", 2),')
+          s = s.replace('1 -> EmptyEnterpriseTab("ENERGIE", "Energiegegevens worden alleen getoond wanneer uw Toon ze werkelijk beschikbaar stelt.", Icons.Outlined.Bolt, Orange)\n                2 -> EmptyEnterpriseTab("PROGRAMMA", "Programmastanden worden in de volgende koppellaag rechtstreeks van Toon gelezen.", Icons.Outlined.Schedule, Purple)',
+                        '1 -> EmptyEnterpriseTab("PROGRAMMA", "Programmastanden worden alleen getoond wanneer uw Toon ze werkelijk beschikbaar stelt.", Icons.Outlined.Schedule, Purple)\n                2 -> EmptyEnterpriseTab("ENERGIE", "Energiegegevens worden alleen getoond wanneer uw Toon ze werkelijk beschikbaar stelt.", Icons.Outlined.Bolt, Green)')
+
+          # Match the iPhone black/navy/purple gradient more closely.
+          s = s.replace('Brush.verticalGradient(listOf(Color(0xFF071A2D), Color(0xFF0C3150), Color(0xFF11152C)))',
+                        'Brush.verticalGradient(listOf(Color.Black, Color(0xFF071833), Color(0xFF290A34)))')
+          s = s.replace('Brush.verticalGradient(listOf(Color(0xFF071522), Color(0xFF0B2940), Color(0xFF071522)))',
+                        'Brush.verticalGradient(listOf(Color.Black, Color(0xFF081A33), Color(0xFF071522)))')
+
           p.write_text(s)
           PY
       - name: Build APK
         working-directory: toon-remote
         run: gradle assembleDebug --stacktrace
       - name: Rename APK
-        run: cp toon-remote/app/build/outputs/apk/debug/app-debug.apk JSW-ToonRemote-Enterprise-v1.2.apk
+        run: cp toon-remote/app/build/outputs/apk/debug/app-debug.apk JSW-ToonRemote-Enterprise-v1.3.apk
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: JSW-ToonRemote-Enterprise-v1.2
-          path: JSW-ToonRemote-Enterprise-v1.2.apk
+          name: JSW-ToonRemote-Enterprise-v1.3
+          path: JSW-ToonRemote-Enterprise-v1.3.apk
           if-no-files-found: error
