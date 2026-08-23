@@ -1,0 +1,26 @@
+name: Build JSW Toon Remote iOS
+
+on:
+  push:
+    branches: [ios-toon-remote]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show Xcode version
+        run: xcodebuild -version
+      - name: Build for iPhone Simulator
+        working-directory: toon-remote-ios
+        run: |
+          xcodebuild \
+            -project ToonRemoteJSW.xcodeproj \
+            -target ToonRemoteJSW \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            CODE_SIGNING_ALLOWED=NO \
+            build
