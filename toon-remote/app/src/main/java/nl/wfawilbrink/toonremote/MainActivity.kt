@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -19,8 +20,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -34,21 +38,23 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 
-private val Navy = Color(0xFF07121F)
-private val Panel = Color(0xFF102A43)
-private val Cyan = Color(0xFF2DE2E6)
-private val Blue = Color(0xFF4D8DFF)
-private val Purple = Color(0xFF9B6BFF)
-private val Orange = Color(0xFFFFA94D)
-private val Green = Color(0xFF42E695)
-private val Red = Color(0xFFFF6577)
-private val TextSoft = Color(0xFFA8C2D8)
+private val Bg = Color(0xFF06111C)
+private val Bg2 = Color(0xFF0A1C2C)
+private val Panel = Color(0xFF102A3C)
+private val PanelSoft = Color(0xFF17394E)
+private val Aqua = Color(0xFF33E6D0)
+private val Blue = Color(0xFF66A6FF)
+private val Purple = Color(0xFFA887FF)
+private val Orange = Color(0xFFFFB45C)
+private val Green = Color(0xFF55E39A)
+private val Red = Color(0xFFFF6D7C)
+private val Soft = Color(0xFF9CB8C9)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme(primary = Cyan, background = Navy, surface = Panel)) {
+            MaterialTheme(colorScheme = darkColorScheme(primary = Aqua, background = Bg, surface = Panel)) {
                 ToonRemoteApp()
             }
         }
@@ -67,10 +73,12 @@ data class ToonData(
 
 data class EnergyData(val usage: Int, val production: Int, val gas: Double)
 
+data class Endpoint(val baseUrl: String, val mode: String)
+
 sealed class ConnectionState {
     object Idle : ConnectionState()
     object Testing : ConnectionState()
-    data class Connected(val data: ToonData) : ConnectionState()
+    data class Connected(val data: ToonData, val endpoint: Endpoint) : ConnectionState()
     data class Failed(val message: String) : ConnectionState()
 }
 
@@ -78,43 +86,49 @@ sealed class ConnectionState {
 fun ToonRemoteApp() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("toon_remote", Context.MODE_PRIVATE) }
-    var savedIp by remember { mutableStateOf(prefs.getString("toon_ip", "") ?: "") }
-    var connection by remember { mutableStateOf<ConnectionState>(ConnectionState.Idle) }
-    var showSetup by remember { mutableStateOf(savedIp.isBlank()) }
+    var localIp by remember { mutableStateOf(prefs.getString("local_ip", "192.168.2.52") ?: "192.168.2.52") }
+    var remoteHost by remember { mutableStateOf(prefs.getString("remote_host", "") ?: "") }
+    var remotePort by remember { mutableStateOf(prefs.getString("remote_port", "8089") ?: "8089") }
+    var state by remember { mutableStateOf<ConnectionState>(ConnectionState.Idle) }
+    var showSetup by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    fun test(ip: String, save: Boolean = false) {
-        connection = ConnectionState.Testing
-        scope.launch {
-            val result = runCatching { fetchToon(ip) }
-            connection = result.fold(
-                onSuccess = {
-                    if (save) {
-                        prefs.edit().putString("toon_ip", ip).apply()
-                        savedIp = ip
-                        showSetup = false
-                    }
-                    ConnectionState.Connected(it)
-                },
-                onFailure = { ConnectionState.Failed(it.message ?: "Geen verbinding met Toon") }
-            )
+    suspend fun connect(): ConnectionState {
+        val local = Endpoint("http://$localIp", "LOKAAL")
+        runCatching { return ConnectionState.Connected(fetchToon(local), local) }
+        if (remoteHost.isNotBlank()) {
+            val remote = Endpoint("http://$remoteHost:$remotePort", "REMOTE")
+            runCatching { return ConnectionState.Connected(fetchToon(remote), remote) }
         }
+        return ConnectionState.Failed("Geen verbinding met lokale Toon of extern adres")
     }
 
-    LaunchedEffect(savedIp) { if (savedIp.isNotBlank()) test(savedIp) }
+    fun refresh() {
+        state = ConnectionState.Testing
+        scope.launch { state = connect() }
+    }
+
+    LaunchedEffect(localIp, remoteHost, remotePort) { refresh() }
 
     if (showSetup) {
-        SetupWizard(savedIp, connection) { test(it, true) }
+        SetupScreen(localIp, remoteHost, remotePort, onSave = { l, r, p ->
+            localIp = l
+            remoteHost = r
+            remotePort = p
+            prefs.edit().putString("local_ip", l).putString("remote_host", r).putString("remote_port", p).apply()
+            showSetup = false
+            refresh()
+        }, onBack = { showSetup = false })
     } else {
-        EnterpriseDashboard(
-            ip = savedIp,
-            state = connection,
-            onRefresh = { test(savedIp) },
-            onSetup = { showSetup = true },
+        Dashboard(
+            state = state,
+            onRefresh = ::refresh,
+            onSettings = { showSetup = true },
             onSetpoint = { value ->
+                val endpoint = (state as? ConnectionState.Connected)?.endpoint ?: return@Dashboard
                 scope.launch {
-                    runCatching { setToonTemperature(savedIp, value) }
-                    test(savedIp)
+                    runCatching { setToonTemperature(endpoint, value) }
+                    state = connect()
                 }
             }
         )
@@ -122,180 +136,320 @@ fun ToonRemoteApp() {
 }
 
 @Composable
-fun SetupWizard(initialIp: String, state: ConnectionState, onTestAndSave: (String) -> Unit) {
-    var ip by remember { mutableStateOf(initialIp) }
-    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF071A2D), Color(0xFF0C3150), Color(0xFF11152C))))) {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Spacer(Modifier.height(28.dp))
-            Text("TOON REMOTE", fontSize = 30.sp, fontWeight = FontWeight.Black, letterSpacing = 2.sp)
-            Text("Enterprise Edition v1.2", color = Cyan, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-            Text("W.F.A. Wilbrink Software", color = TextSoft, fontSize = 12.sp)
-            Spacer(Modifier.height(28.dp))
-            Surface(Modifier.fillMaxWidth(), color = Color(0xCC102A43), shape = RoundedCornerShape(30.dp)) {
-                Column(Modifier.padding(24.dp)) {
-                    Text("Koppel uw Toon 2", fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
-                    Spacer(Modifier.height(14.dp))
-                    OutlinedTextField(value = ip, onValueChange = { ip = it.trim() }, modifier = Modifier.fillMaxWidth(), label = { Text("Toon IP-adres") }, singleLine = true)
-                    Spacer(Modifier.height(16.dp))
-                    Button(onClick = { if (ip.isNotBlank()) onTestAndSave(ip) }, enabled = state !is ConnectionState.Testing && ip.isNotBlank(), modifier = Modifier.fillMaxWidth().height(56.dp)) {
-                        Text(if (state is ConnectionState.Testing) "VERBINDING TESTEN…" else "TEST & VERBIND", fontWeight = FontWeight.Black)
-                    }
-                    if (state is ConnectionState.Failed) Text(state.message, color = Red, modifier = Modifier.padding(top = 12.dp))
+fun Dashboard(state: ConnectionState, onRefresh: () -> Unit, onSettings: () -> Unit, onSetpoint: (Double) -> Unit) {
+    val connected = state as? ConnectionState.Connected
+    val data = connected?.data
+    val endpoint = connected?.endpoint
+    var tab by remember { mutableIntStateOf(0) }
+
+    Scaffold(
+        containerColor = Bg,
+        bottomBar = {
+            NavigationBar(containerColor = Color(0xFF081722)) {
+                listOf(
+                    Triple(Icons.Outlined.Home, "Home", 0),
+                    Triple(Icons.Outlined.Bolt, "Energie", 1),
+                    Triple(Icons.Outlined.Schedule, "Programma", 2),
+                    Triple(Icons.Outlined.Settings, "Instellingen", 3)
+                ).forEach { item ->
+                    NavigationBarItem(
+                        selected = tab == item.third,
+                        onClick = { tab = item.third },
+                        icon = { Icon(item.first, item.second) },
+                        label = { Text(item.second) },
+                        colors = NavigationBarItemDefaults.colors(indicatorColor = Aqua, selectedIconColor = Bg, selectedTextColor = Aqua)
+                    )
                 }
             }
         }
-    }
-}
-
-@Composable
-fun EnterpriseDashboard(ip: String, state: ConnectionState, onRefresh: () -> Unit, onSetup: () -> Unit, onSetpoint: (Double) -> Unit) {
-    val data = (state as? ConnectionState.Connected)?.data
-    var selectedTab by remember { mutableIntStateOf(0) }
-    Scaffold(containerColor = Navy, bottomBar = {
-        NavigationBar(containerColor = Color(0xFF091A2A)) {
-            listOf(Triple(Icons.Outlined.Home, "Home", 0), Triple(Icons.Outlined.Bolt, "Energie", 1), Triple(Icons.Outlined.Schedule, "Programma", 2), Triple(Icons.Outlined.Settings, "Instellingen", 3)).forEach { item ->
-                NavigationBarItem(selected = selectedTab == item.third, onClick = { selectedTab = item.third }, icon = { Icon(item.first, item.second) }, label = { Text(item.second) })
-            }
-        }
-    }) { pad ->
-        Box(Modifier.fillMaxSize().padding(pad).background(Brush.verticalGradient(listOf(Color(0xFF071522), Color(0xFF0B2940), Color(0xFF071522))))) {
-            when (selectedTab) {
-                0 -> HomeTab(ip, state, data, onRefresh, onSetup, onSetpoint)
-                1 -> EnergyTab(ip)
-                2 -> ProgramTab(data)
-                else -> SettingsTab(ip, data != null, onSetup, onRefresh)
+    ) { pad ->
+        Box(Modifier.fillMaxSize().padding(pad).background(Brush.verticalGradient(listOf(Bg2, Bg, Color(0xFF07151F))))) {
+            when (tab) {
+                0 -> HomeScreen(state, data, endpoint, onRefresh, onSettings, onSetpoint)
+                1 -> EnergyScreen(endpoint)
+                2 -> ProgramScreen(data)
+                else -> SettingsScreen(endpoint, onSettings, onRefresh)
             }
         }
     }
 }
 
 @Composable
-fun HomeTab(ip: String, state: ConnectionState, data: ToonData?, onRefresh: () -> Unit, onSetup: () -> Unit, onSetpoint: (Double) -> Unit) {
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
-        Header(data != null, state is ConnectionState.Testing, onRefresh)
+fun HomeScreen(state: ConnectionState, data: ToonData?, endpoint: Endpoint?, onRefresh: () -> Unit, onSettings: () -> Unit, onSetpoint: (Double) -> Unit) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
+        Spacer(Modifier.height(16.dp))
+        Header(endpoint, state is ConnectionState.Testing, onRefresh)
         Spacer(Modifier.height(18.dp))
-        val live = data ?: run {
-            Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(24.dp)) { Column(Modifier.padding(24.dp)) { Text("Toon offline", fontSize = 22.sp, fontWeight = FontWeight.Bold); Text("IP: $ip", color = TextSoft); Spacer(Modifier.height(12.dp)); Button(onClick = onSetup) { Text("Instellingen") } } }
+
+        if (data == null) {
+            Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(28.dp)) {
+                Column(Modifier.padding(24.dp)) {
+                    Text("Geen verbinding", fontSize = 24.sp, fontWeight = FontWeight.Black)
+                    Text((state as? ConnectionState.Failed)?.message ?: "Toon wordt gezocht…", color = Soft)
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = onSettings) { Text("Verbinding instellen") }
+                }
+            }
             return@Column
         }
-        Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(30.dp)) {
-            Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Woonkamer", fontSize = 24.sp, fontWeight = FontWeight.Black)
-                Text("Live van Toon · $ip", color = Green, fontSize = 11.sp)
-                Spacer(Modifier.height(22.dp))
-                Text(formatTemp(live.roomTemp), fontSize = 62.sp, fontWeight = FontWeight.Black)
-                Text("BINNENTEMPERATUUR", color = TextSoft, fontSize = 10.sp)
-                Spacer(Modifier.height(20.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { onSetpoint((live.setpoint - .5).coerceAtLeast(5.0)) }) { Icon(Icons.Default.Remove, null, tint = Blue) }
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(horizontal = 24.dp)) { Text(formatTemp(live.setpoint), fontSize = 34.sp, fontWeight = FontWeight.Black); Text("GEWENST", color = TextSoft, fontSize = 10.sp) }
-                    IconButton(onClick = { onSetpoint((live.setpoint + .5).coerceAtMost(30.0)) }) { Icon(Icons.Default.Add, null, tint = Purple) }
+
+        Surface(Modifier.fillMaxWidth(), color = Color(0xD9102A3C), shape = RoundedCornerShape(34.dp)) {
+            Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column {
+                        Text("Woonkamer", fontSize = 24.sp, fontWeight = FontWeight.Black)
+                        Text(endpoint?.mode ?: "", color = if (endpoint?.mode == "REMOTE") Purple else Green, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(Modifier.weight(1f))
+                    Surface(color = if (data.heating) Orange.copy(alpha=.16f) else Green.copy(alpha=.15f), shape = RoundedCornerShape(99.dp)) {
+                        Text(if (data.heating) "VERWARMEN" else "STAND-BY", color = if (data.heating) Orange else Green, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), fontSize = 10.sp, fontWeight = FontWeight.Black)
+                    }
                 }
-                Spacer(Modifier.height(14.dp))
-                Text(if (live.heating) "VERWARMEN" else "STAND-BY", color = if (live.heating) Orange else Green, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                ThermostatRing(data.roomTemp, data.setpoint, data.heating)
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SetpointButton(Icons.Default.Remove, Blue) { onSetpoint((data.setpoint - .5).coerceAtLeast(5.0)) }
+                    Column(Modifier.padding(horizontal = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(formatTemp(data.setpoint), fontSize = 34.sp, fontWeight = FontWeight.Black)
+                        Text("GEWENST", color = Soft, fontSize = 10.sp, letterSpacing = 1.4.sp)
+                    }
+                    SetpointButton(Icons.Default.Add, Purple) { onSetpoint((data.setpoint + .5).coerceAtMost(30.0)) }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            MetricTile("BINNEN", formatTemp(data.roomTemp), Icons.Outlined.Thermostat, Blue, Modifier.weight(1f))
+            MetricTile("DOEL", formatTemp(data.setpoint), Icons.Outlined.Tune, Purple, Modifier.weight(1f))
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            MetricTile("KETEL", if (data.heating) "AAN" else "UIT", Icons.Outlined.LocalFireDepartment, Orange, Modifier.weight(1f))
+            MetricTile("LINK", endpoint?.mode ?: "OFFLINE", Icons.Outlined.Wifi, Green, Modifier.weight(1f))
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+fun ThermostatRing(room: Double, setpoint: Double, heating: Boolean) {
+    Box(Modifier.size(270.dp), contentAlignment = Alignment.Center) {
+        Canvas(Modifier.fillMaxSize()) {
+            val stroke = 16.dp.toPx()
+            drawArc(Color(0xFF244355), 135f, 270f, false, style = Stroke(stroke, cap = StrokeCap.Round))
+            val progress = ((setpoint - 5.0) / 25.0).coerceIn(0.0, 1.0).toFloat()
+            drawArc(if (heating) Orange else Aqua, 135f, 270f * progress, false, style = Stroke(stroke, cap = StrokeCap.Round))
+            drawCircle(Color(0x221FFFFFF), radius = size.minDimension * .35f)
+            drawCircle(Aqua.copy(alpha=.25f), radius = 5.dp.toPx(), center = Offset(size.width * .5f, size.height * .08f))
+        }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(formatTemp(room), fontSize = 58.sp, fontWeight = FontWeight.Black)
+            Text("BINNENTEMPERATUUR", color = Soft, fontSize = 10.sp, letterSpacing = 1.3.sp)
+        }
+    }
+}
+
+@Composable
+fun SetpointButton(icon: androidx.compose.ui.graphics.vector.ImageVector, accent: Color, onClick: () -> Unit) {
+    Surface(Modifier.size(56.dp).clickable { onClick() }, color = accent.copy(alpha=.16f), shape = CircleShape) {
+        Box(contentAlignment = Alignment.Center) { Icon(icon, null, tint = accent, modifier = Modifier.size(28.dp)) }
+    }
+}
+
+@Composable
+fun MetricTile(title: String, value: String, icon: androidx.compose.ui.graphics.vector.ImageVector, accent: Color, modifier: Modifier = Modifier) {
+    Surface(modifier, color = Panel, shape = RoundedCornerShape(24.dp)) {
+        Column(Modifier.padding(18.dp)) {
+            Icon(icon, null, tint = accent)
+            Spacer(Modifier.height(14.dp))
+            Text(value, fontSize = 24.sp, fontWeight = FontWeight.Black)
+            Text(title, color = Soft, fontSize = 10.sp)
+        }
+    }
+}
+
+@Composable
+fun EnergyScreen(endpoint: Endpoint?) {
+    var energy by remember(endpoint?.baseUrl) { mutableStateOf<EnergyData?>(null) }
+    var error by remember(endpoint?.baseUrl) { mutableStateOf<String?>(null) }
+    LaunchedEffect(endpoint?.baseUrl) {
+        if (endpoint != null) runCatching { fetchEnergy(endpoint) }.onSuccess { energy = it }.onFailure { error = it.message }
+    }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp)) {
+        Text("ENERGIE", fontSize = 28.sp, fontWeight = FontWeight.Black)
+        Text("Live uit Toon", color = Soft)
+        Spacer(Modifier.height(16.dp))
+        val e = energy
+        if (e == null) {
+            Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(26.dp)) { Text(error ?: "Laden…", modifier = Modifier.padding(24.dp)) }
+        } else {
+            EnergyHero("Stroom nu", "${e.usage} W", Orange, Icons.Outlined.Bolt)
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                EnergySmall("Productie", "${e.production} W", Green, Modifier.weight(1f))
+                EnergySmall("Gas", String.format(Locale.US, "%.2f", e.gas), Purple, Modifier.weight(1f))
             }
         }
     }
 }
 
 @Composable
-fun EnergyTab(ip: String) {
-    var energy by remember { mutableStateOf<EnergyData?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(ip) { runCatching { fetchEnergy(ip) }.onSuccess { energy = it }.onFailure { error = it.message } }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
-        Text("ENERGIECENTRUM", color = TextSoft, fontSize = 11.sp, letterSpacing = 2.sp)
-        Spacer(Modifier.height(12.dp))
-        if (energy == null) {
-            Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(24.dp)) { Text(error ?: "Energiegegevens laden…", modifier = Modifier.padding(24.dp)) }
-        } else {
-            val e = energy!!
-            EnergyCard("STROOM NU", "${e.usage} W", "Live verbruik", Icons.Outlined.Bolt, Orange)
-            Spacer(Modifier.height(12.dp))
-            EnergyCard("TERUGLEVERING", "${e.production} W", "Live productie", Icons.Outlined.SolarPower, Green)
-            Spacer(Modifier.height(12.dp))
-            EnergyCard("GAS", String.format(Locale.US, "%.2f", e.gas), "Live gaswaarde van Toon", Icons.Outlined.LocalFireDepartment, Purple)
+fun EnergyHero(title: String, value: String, accent: Color, icon: androidx.compose.ui.graphics.vector.ImageVector) {
+    Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(30.dp)) {
+        Row(Modifier.padding(24.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(color = accent.copy(alpha=.16f), shape = CircleShape) { Icon(icon, null, tint = accent, modifier = Modifier.padding(16.dp).size(32.dp)) }
+            Spacer(Modifier.width(20.dp))
+            Column { Text(title, color = Soft); Text(value, fontSize = 38.sp, fontWeight = FontWeight.Black) }
         }
     }
 }
 
 @Composable
-fun EnergyCard(title: String, value: String, subtitle: String, icon: androidx.compose.ui.graphics.vector.ImageVector, accent: Color) {
-    Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(24.dp)) {
-        Row(Modifier.padding(22.dp), verticalAlignment = Alignment.CenterVertically) {
-            Surface(color = accent.copy(alpha = .16f), shape = CircleShape) { Icon(icon, null, tint = accent, modifier = Modifier.padding(14.dp).size(28.dp)) }
-            Spacer(Modifier.width(18.dp)); Column { Text(title, color = TextSoft, fontSize = 11.sp); Text(value, fontSize = 30.sp, fontWeight = FontWeight.Black); Text(subtitle, color = TextSoft, fontSize = 11.sp) }
+fun EnergySmall(title: String, value: String, accent: Color, modifier: Modifier) {
+    Surface(modifier, color = Panel, shape = RoundedCornerShape(26.dp)) {
+        Column(Modifier.padding(20.dp)) {
+            Text(title, color = accent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(10.dp))
+            Text(value, fontSize = 26.sp, fontWeight = FontWeight.Black)
         }
     }
 }
 
 @Composable
-fun ProgramTab(data: ToonData?) {
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
-        Text("PROGRAMMA", color = TextSoft, fontSize = 11.sp, letterSpacing = 2.sp)
-        Spacer(Modifier.height(12.dp))
+fun ProgramScreen(data: ToonData?) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp)) {
+        Text("PROGRAMMA", fontSize = 28.sp, fontWeight = FontWeight.Black)
+        Text("Beschikbare Toon-programmagegevens", color = Soft)
+        Spacer(Modifier.height(16.dp))
         if (data == null) {
-            Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(24.dp)) { Text("Geen live Toon-data beschikbaar.", modifier = Modifier.padding(24.dp)) }
+            Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(26.dp)) { Text("Geen live Toon-data", modifier = Modifier.padding(24.dp)) }
         } else {
-            ProgramCard("PROGRAMMASTATUS", programLabel(data.programState), "Waarde: ${data.programState}", Purple)
+            TimelineCard("Programma", programLabel(data.programState), Purple)
             Spacer(Modifier.height(12.dp))
-            ProgramCard("ACTIEVE STAND", activeLabel(data.activeState), "Waarde: ${data.activeState}", Blue)
+            TimelineCard("Actieve stand", activeLabel(data.activeState), Blue)
             Spacer(Modifier.height(12.dp))
-            ProgramCard("VOLGENDE SETPOINT", if (data.nextSetpoint > 0) formatTemp(data.nextSetpoint) else "Niet beschikbaar", if (data.nextTime > 0) "Toon nextTime: ${data.nextTime}" else "Geen volgend schakelmoment gemeld", Orange)
-            Spacer(Modifier.height(12.dp))
-            Text("Deze Toon-firmware ondersteunt geen getProgramInfo/getThermostatStates. Daarom toont deze tab uitsluitend werkelijk beschikbare thermostat-data.", color = TextSoft, fontSize = 11.sp, textAlign = TextAlign.Center)
+            TimelineCard("Volgende temperatuur", if (data.nextSetpoint > 0) formatTemp(data.nextSetpoint) else "Niet gemeld", Orange)
         }
     }
 }
 
 @Composable
-fun ProgramCard(title: String, value: String, subtitle: String, accent: Color) {
-    Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(24.dp)) { Column(Modifier.padding(22.dp)) { Text(title, color = accent, fontSize = 11.sp, fontWeight = FontWeight.Bold); Text(value, fontSize = 26.sp, fontWeight = FontWeight.Black); Text(subtitle, color = TextSoft, fontSize = 11.sp) } }
+fun TimelineCard(title: String, value: String, accent: Color) {
+    Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(26.dp)) {
+        Row(Modifier.padding(22.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(12.dp).background(accent, CircleShape))
+            Spacer(Modifier.width(16.dp))
+            Column { Text(title, color = Soft, fontSize = 11.sp); Text(value, fontSize = 24.sp, fontWeight = FontWeight.Black) }
+        }
+    }
 }
 
 @Composable
-fun SettingsTab(ip: String, connected: Boolean, onSetup: () -> Unit, onRefresh: () -> Unit) {
-    Column(Modifier.fillMaxSize().padding(20.dp)) { Text("INSTELLINGEN", color = TextSoft, fontSize = 11.sp); Spacer(Modifier.height(12.dp)); Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(24.dp)) { Column(Modifier.padding(22.dp)) { Text("Toon IP", color = TextSoft); Text(ip, fontSize = 22.sp, fontWeight = FontWeight.Bold); Text(if (connected) "Verbonden" else "Offline", color = if (connected) Green else Red); Spacer(Modifier.height(14.dp)); Row { Button(onClick = onRefresh) { Text("Vernieuwen") }; Spacer(Modifier.width(10.dp)); OutlinedButton(onClick = onSetup) { Text("Wijzigen") } } } } }
+fun SettingsScreen(endpoint: Endpoint?, onSettings: () -> Unit, onRefresh: () -> Unit) {
+    Column(Modifier.fillMaxSize().padding(18.dp)) {
+        Text("INSTELLINGEN", fontSize = 28.sp, fontWeight = FontWeight.Black)
+        Spacer(Modifier.height(16.dp))
+        Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(26.dp)) {
+            Column(Modifier.padding(22.dp)) {
+                Text("Actieve verbinding", color = Soft)
+                Text(endpoint?.mode ?: "Offline", fontSize = 26.sp, fontWeight = FontWeight.Black)
+                Text(endpoint?.baseUrl ?: "Geen endpoint actief", color = Soft, fontSize = 12.sp)
+                Spacer(Modifier.height(16.dp))
+                Row { Button(onClick = onRefresh) { Text("Vernieuwen") }; Spacer(Modifier.width(10.dp)); OutlinedButton(onClick = onSettings) { Text("Verbinding") } }
+            }
+        }
+    }
 }
 
 @Composable
-fun Header(connected: Boolean, loading: Boolean, onRefresh: () -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Column { Text("TOON REMOTE", fontWeight = FontWeight.Black, fontSize = 18.sp); Text("W.F.A. Wilbrink Software · Enterprise v1.2", color = TextSoft, fontSize = 10.sp) }; Spacer(Modifier.weight(1f)); Surface(Modifier.clickable(enabled = !loading) { onRefresh() }, color = if (connected) Green.copy(alpha = .14f) else Red.copy(alpha = .14f), shape = RoundedCornerShape(99.dp)) { Text(if (loading) "TESTEN" else if (connected) "VERBONDEN" else "OFFLINE", color = if (connected) Green else Red, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), fontSize = 10.sp, fontWeight = FontWeight.Black) } }
+fun SetupScreen(local: String, remote: String, port: String, onSave: (String, String, String) -> Unit, onBack: () -> Unit) {
+    var localIp by remember { mutableStateOf(local) }
+    var remoteHost by remember { mutableStateOf(remote) }
+    var remotePort by remember { mutableStateOf(port) }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(22.dp)) {
+        Text("VERBINDING", fontSize = 28.sp, fontWeight = FontWeight.Black)
+        Text("Toon Remote v1.3", color = Aqua, fontWeight = FontWeight.Bold)
+        Text("W.F.A. Wilbrink Software", color = Soft, fontSize = 12.sp)
+        Spacer(Modifier.height(20.dp))
+        Surface(Modifier.fillMaxWidth(), color = Panel, shape = RoundedCornerShape(28.dp)) {
+            Column(Modifier.padding(22.dp)) {
+                Text("Lokaal", fontWeight = FontWeight.Bold)
+                OutlinedTextField(localIp, { localIp = it.trim() }, Modifier.fillMaxWidth(), label = { Text("Toon IP") }, singleLine = true)
+                Spacer(Modifier.height(16.dp))
+                Text("Buitenshuis", fontWeight = FontWeight.Bold)
+                OutlinedTextField(remoteHost, { remoteHost = it.trim() }, Modifier.fillMaxWidth(), label = { Text("Extern IP-adres") }, placeholder = { Text("bijv. 84.25.x.x") }, singleLine = true)
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(remotePort, { remotePort = it.filter(Char::isDigit) }, Modifier.fillMaxWidth(), label = { Text("Externe poort") }, singleLine = true)
+                Spacer(Modifier.height(18.dp))
+                Text("De app probeert eerst lokaal en schakelt daarna automatisch naar het externe IP op poort 8089.", color = Soft, fontSize = 12.sp)
+                Spacer(Modifier.height(18.dp))
+                Button(onClick = { onSave(localIp, remoteHost, remotePort.ifBlank { "8089" }) }, modifier = Modifier.fillMaxWidth().height(54.dp)) { Text("OPSLAAN", fontWeight = FontWeight.Black) }
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Terug") }
+            }
+        }
+    }
 }
 
-suspend fun fetchToon(ip: String): ToonData = withContext(Dispatchers.IO) {
-    val o = getJson("http://$ip/happ_thermstat?action=getThermostatInfo")
+@Composable
+fun Header(endpoint: Endpoint?, loading: Boolean, onRefresh: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column {
+            Text("TOON REMOTE", fontSize = 19.sp, fontWeight = FontWeight.Black)
+            Text("W.F.A. Wilbrink Software · v1.3", color = Soft, fontSize = 10.sp)
+        }
+        Spacer(Modifier.weight(1f))
+        Surface(Modifier.clickable(enabled = !loading) { onRefresh() }, color = if (endpoint != null) Green.copy(alpha=.14f) else Red.copy(alpha=.14f), shape = RoundedCornerShape(99.dp)) {
+            Text(if (loading) "TESTEN" else endpoint?.mode ?: "OFFLINE", color = if (endpoint != null) Green else Red, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), fontWeight = FontWeight.Black, fontSize = 10.sp)
+        }
+    }
+}
+
+suspend fun fetchToon(endpoint: Endpoint): ToonData = withContext(Dispatchers.IO) {
+    val o = getJson(endpoint.baseUrl + "/happ_thermstat?action=getThermostatInfo")
     fun temp(name: String): Double {
         val raw = o.optString(name).toDoubleOrNull() ?: o.optDouble(name, Double.NaN)
         if (raw.isNaN()) error("Ongeldige $name")
         return raw / 100.0
     }
-    ToonData(temp("currentTemp"), temp("currentSetpoint"), o.optInt("burnerInfo", 0) > 0, o.optInt("activeState", -1), o.optInt("programState", -1), o.optLong("nextTime", 0L), (o.optString("nextSetpoint").toDoubleOrNull() ?: 0.0) / 100.0)
+    ToonData(
+        temp("currentTemp"),
+        temp("currentSetpoint"),
+        o.optInt("burnerInfo", 0) > 0,
+        o.optInt("activeState", -1),
+        o.optInt("programState", -1),
+        o.optLong("nextTime", 0L),
+        (o.optString("nextSetpoint").toDoubleOrNull() ?: 0.0) / 100.0
+    )
 }
 
-suspend fun fetchEnergy(ip: String): EnergyData = withContext(Dispatchers.IO) {
-    val o = getJson("http://$ip/happ_pwrusage?action=GetCurrentUsage")
-    val usage = o.optJSONObject("powerUsage")?.optInt("value", 0) ?: 0
-    val production = o.optJSONObject("powerProduction")?.optInt("value", 0) ?: 0
-    val gasRaw = o.optJSONObject("gasUsage")?.optDouble("value", 0.0) ?: 0.0
-    EnergyData(usage, production, gasRaw)
+suspend fun fetchEnergy(endpoint: Endpoint): EnergyData = withContext(Dispatchers.IO) {
+    val o = getJson(endpoint.baseUrl + "/happ_pwrusage?action=GetCurrentUsage")
+    val p = o.optJSONObject("powerUsage") ?: JSONObject()
+    val prod = o.optJSONObject("powerProduction") ?: JSONObject()
+    val gas = o.optJSONObject("gasUsage") ?: JSONObject()
+    EnergyData(p.optInt("value", 0), prod.optInt("value", 0), gas.optDouble("value", 0.0))
 }
 
-suspend fun setToonTemperature(ip: String, value: Double) = withContext(Dispatchers.IO) {
-    val hundredths = (value * 100).toInt()
-    val o = getJson("http://$ip/happ_thermstat?action=setSetpoint&Setpoint=$hundredths")
-    if (o.optString("result") != "ok") error(o.optString("error", "Toon weigerde setpoint"))
+suspend fun setToonTemperature(endpoint: Endpoint, value: Double) = withContext(Dispatchers.IO) {
+    val raw = (value * 100).toInt()
+    val o = getJson(endpoint.baseUrl + "/happ_thermstat?action=setSetpoint&Setpoint=$raw")
+    if (!o.optString("result").equals("ok", true)) error(o.optString("error", "Toon weigerde temperatuurwijziging"))
 }
 
-private fun getJson(url: String): JSONObject {
-    val conn = URL(url).openConnection() as HttpURLConnection
-    conn.connectTimeout = 3500; conn.readTimeout = 3500; conn.requestMethod = "GET"
-    val code = conn.responseCode
-    if (code !in 200..299) error("Toon antwoordt met HTTP $code")
-    val body = conn.inputStream.bufferedReader().use { it.readText() }
+fun getJson(url: String): JSONObject {
+    val c = URL(url).openConnection() as HttpURLConnection
+    c.connectTimeout = 3500
+    c.readTimeout = 3500
+    c.requestMethod = "GET"
+    val code = c.responseCode
+    if (code !in 200..299) error("HTTP $code")
+    val body = c.inputStream.bufferedReader().use { it.readText() }
     return JSONObject(body)
 }
 
-private fun formatTemp(value: Double) = String.format(Locale.US, "%.1f°", value)
-private fun programLabel(v: Int) = when (v) { 0 -> "Programma uit / handmatig"; 1 -> "Programma actief"; else -> "Onbekend" }
-private fun activeLabel(v: Int) = when (v) { -1 -> "Geen actieve programmastand"; 0 -> "Thuis"; 1 -> "Slapen"; 2 -> "Weg"; 3 -> "Comfort"; else -> "Stand $v" }
+fun formatTemp(v: Double) = String.format(Locale.US, "%.1f°", v)
+fun programLabel(v: Int) = when (v) { 0 -> "Uit"; 1 -> "Aan"; else -> "Onbekend ($v)" }
+fun activeLabel(v: Int) = when (v) { -1 -> "Geen actieve stand"; 0 -> "Comfort"; 1 -> "Thuis"; 2 -> "Slapen"; 3 -> "Weg"; else -> "Stand $v" }
