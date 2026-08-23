@@ -3,9 +3,8 @@ name: Build Toon Remote APK
 on:
   push:
     branches: [toon-remote-apk]
-    paths:
-      - 'toon-remote/**'
-      - '.github/workflows/toon-remote-apk.yml'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
