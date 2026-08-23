@@ -3,6 +3,7 @@ plugins { id("com.android.application"); id("org.jetbrains.kotlin.android"); id(
 android {
     namespace = "nl.wfawilbrink.toonremote"
     compileSdk = 35
+
     defaultConfig {
         applicationId = "nl.wfawilbrink.toonremote"
         minSdk = 26
@@ -10,6 +11,16 @@ android {
         versionCode = 1
         versionName = "1.0.0"
     }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
     buildFeatures { compose = true }
 }
 
